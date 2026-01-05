@@ -5,499 +5,246 @@ const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 3000;
 
 const DATABASE_SECRETS = process.env.DATABASE_SECRETS;
 const DATABASE_URL = process.env.DATABASE;
 
 const FIXED_DB_URL = DATABASE_URL && !DATABASE_URL.endsWith('/') ? DATABASE_URL + '/' : DATABASE_URL;
 
-// 📱 قائمة User-Agents متنوعة
-const USER_AGENTS = [
-    // Chrome على Windows
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    // Chrome على Mac
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    // Firefox على Windows
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
-    // Safari على Mac
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
-    // Edge على Windows
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
-    // Chrome على Android
-    'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-    // Safari على iPhone
-    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
-];
-
-// 🌐 قائمة Referers مختلفة
-const REFERERS = [
-    'https://www.google.com/',
-    'https://www.bing.com/',
-    'https://duckduckgo.com/',
-    'https://www.yahoo.com/',
-    'https://www.facebook.com/',
-    'https://twitter.com/',
-    'https://www.reddit.com/',
-    'https://azoramoon.com/',
-    ''
-];
-
-// 🔄 وكالات بروكسي مجانية (قد تعمل أو لا)
-const PROXIES = [
-    '', // بدون بروكسي أولاً
-    'https://cors-anywhere.herokuapp.com/',
-    'https://api.allorigins.win/raw?url=',
-    'https://corsproxy.io/?',
-    'https://proxy.cors.sh/'
-];
-
-// 🔍 قائمة منافذ بديلة للموقع
-const SITE_VARIANTS = [
-    'https://azoramoon.com/',
-    'https://www.azoramoon.com/',
-    'http://azoramoon.com/',
-    'http://www.azoramoon.com/'
-];
-
-// دالة للحصول على رؤوس عشوائية
-function getRandomHeaders() {
-    const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-    const referer = REFERERS[Math.floor(Math.random() * REFERERS.length)];
-    
-    return {
-        'User-Agent': userAgent,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'cross-site',
-        'Sec-Fetch-User': '?1',
-        'Cache-Control': 'max-age=0',
-        'DNT': '1',
-        'Referer': referer,
-        'Pragma': 'no-cache',
-        'TE': 'trailers'
-    };
-}
-
-// 🔄 دالة محاولة جميع البروكسيات
-async function tryAllProxies(url, method = 'GET', data = null) {
-    const errors = [];
-    
-    for (const proxy of PROXIES) {
-        try {
-            let targetUrl = url;
-            
-            if (proxy) {
-                if (proxy.includes('?')) {
-                    targetUrl = proxy + encodeURIComponent(url);
-                } else {
-                    targetUrl = proxy + url;
-                }
-            }
-            
-            console.log(`🔗 المحاولة مع: ${proxy || 'بدون بروكسي'}`);
-            
-            const config = {
-                headers: getRandomHeaders(),
-                timeout: 20000,
-                maxRedirects: 5,
-                validateStatus: function (status) {
-                    return status < 500; // قبول كل شيء أقل من 500
-                }
-            };
-            
-            let response;
-            if (method === 'POST' && data) {
-                response = await axios.post(targetUrl, data, config);
-            } else {
-                response = await axios.get(targetUrl, config);
-            }
-            
-            if (response.status === 200 || response.status === 304) {
-                console.log(`✅ نجح مع ${proxy || 'بدون بروكسي'} - الحالة: ${response.status}`);
-                return response.data;
-            } else if (response.status === 403 || response.status === 429) {
-                console.log(`⚠️ حظر مع ${proxy || 'بدون بروكسي'} - الحالة: ${response.status}`);
-                continue;
-            } else {
-                console.log(`ℹ️ استجابة ${response.status} مع ${proxy || 'بدون بروكسي'}`);
-                return response.data;
-            }
-        } catch (error) {
-            errors.push(`${proxy || 'بدون بروكسي'}: ${error.message}`);
-            console.log(`❌ فشل مع ${proxy || 'بدون بروكسي'}: ${error.message}`);
-            
-            // تأخير بين المحاولات
-            await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-    }
-    
-    throw new Error(`فشل جميع البروكسيات:\n${errors.join('\n')}`);
-}
-
-// دالة الكتابة إلى Firebase
+// 🔧 الدوال الأساسية
 async function writeToFirebase(path, data) {
-    if (!FIXED_DB_URL || !DATABASE_SECRETS) {
-        console.log('⚠️ Firebase غير مهيء');
-        return null;
-    }
-    
     const url = `${FIXED_DB_URL}${path}.json?auth=${DATABASE_SECRETS}`;
-    
     try {
-        const response = await axios.put(url, data, { 
-            timeout: 10000,
-            headers: { 'Content-Type': 'application/json' }
-        });
-        console.log('✅ تم الحفظ في Firebase');
+        await axios.put(url, data, { timeout: 5000 });
+        console.log(`✅ كتب: ${path}`);
+        return true;
+    } catch (error) {
+        console.error(`❌ Firebase: ${error.message}`);
+        return false;
+    }
+}
+
+async function readFromFirebase(path) {
+    const url = `${FIXED_DB_URL}${path}.json?auth=${DATABASE_SECRETS}`;
+    try {
+        const response = await axios.get(url, { timeout: 5000 });
         return response.data;
     } catch (error) {
-        console.error('❌ خطأ في Firebase:', error.message);
+        console.error(`❌ قراءة: ${error.message}`);
         return null;
     }
 }
 
-// دالة جلب الصفحة مع جميع المحاولات
-async function fetchPageWithAllMethods(url) {
-    console.log(`\n🎯 محاولة جلب: ${url}`);
-    
-    // المحاولة 1: مباشر مع رؤوس عشوائية
-    console.log('\n1️⃣ المحاولة المباشرة مع رؤوس عشوائية');
-    try {
-        const response = await axios.get(url, {
-            headers: getRandomHeaders(),
-            timeout: 15000
-        });
-        console.log(`✅ نجحت المحاولة المباشرة - الحالة: ${response.status}`);
-        return response.data;
-    } catch (error) {
-        console.log(`❌ فشلت المحاولة المباشرة: ${error.message}`);
-    }
-    
-    // المحاولة 2: جميع البروكسيات
-    console.log('\n2️⃣ محاولة جميع البروكسيات');
-    try {
-        const html = await tryAllProxies(url);
-        return html;
-    } catch (error) {
-        console.log(`❌ فشلت جميع البروكسيات: ${error.message}`);
-    }
-    
-    // المحاولة 3: HTTPS->HTTP
-    console.log('\n3️⃣ محاولة HTTP بدلاً من HTTPS');
-    if (url.startsWith('https://')) {
-        const httpUrl = url.replace('https://', 'http://');
-        try {
-            const response = await axios.get(httpUrl, {
-                headers: getRandomHeaders(),
-                timeout: 15000
-            });
-            console.log(`✅ نجحت مع HTTP - الحالة: ${response.status}`);
-            return response.data;
-        } catch (error) {
-            console.log(`❌ فشلت مع HTTP: ${error.message}`);
-        }
-    }
-    
-    // المحاولة 4: مع www أو بدون
-    console.log('\n4️⃣ محاولة مع/بدون www');
-    if (url.includes('azoramoon.com')) {
-        const withWWW = url.includes('www.') ? url : url.replace('azoramoon.com', 'www.azoramoon.com');
-        const withoutWWW = url.includes('www.') ? url.replace('www.', '') : url;
-        
-        for (const variant of [withWWW, withoutWWW]) {
-            if (variant !== url) {
-                try {
-                    const response = await axios.get(variant, {
-                        headers: getRandomHeaders(),
-                        timeout: 15000
-                    });
-                    console.log(`✅ نجحت مع ${variant} - الحالة: ${response.status}`);
-                    return response.data;
-                } catch (error) {
-                    console.log(`❌ فشلت مع ${variant}: ${error.message}`);
-                }
-            }
-        }
-    }
-    
-    throw new Error('فشلت جميع طرق الجلب');
-}
-
-// دالة جلب المانجا
-async function scrapeMangaFromPage(pageNum) {
+// 🎯 استخراج المانجا من الصفحة
+async function extractMangaFromPage(pageNum) {
     try {
         const url = `https://azoramoon.com/page/${pageNum}/`;
-        console.log(`\n📥 جلب الصفحة ${pageNum}: ${url}`);
+        console.log(`📥 صفحة ${pageNum}: ${url}`);
         
-        const html = await fetchPageWithAllMethods(url);
-        const $ = cheerio.load(html);
+        const response = await axios.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            },
+            timeout: 10000
+        });
         
+        const $ = cheerio.load(response.data);
         const mangaList = [];
         
-        // 🔍 محاولة جميع الانتقالات المحتملة
-        const selectors = [
-            '.page-item-detail.manga',
-            '.page-item-detail',
-            '.manga-item',
-            '.item-truyen',
-            '.list-truyen .row',
-            '.col-xs-12.col-sm-6.col-md-4',
-            '.manga-entry',
-            '.manga-item-hoz',
-            '.manga-card'
-        ];
-        
-        let foundCount = 0;
-        let usedSelector = '';
-        
-        for (const selector of selectors) {
-            const elements = $(selector);
-            if (elements.length > 0) {
-                console.log(`✅ وجد ${elements.length} عنصر بـ "${selector}"`);
-                foundCount = elements.length;
-                usedSelector = selector;
-                
-                elements.each((i, element) => {
-                    const $el = $(element);
-                    
-                    // محاولات متعددة للعنوان
-                    let title = $el.find('.post-title h3 a').text().trim();
-                    if (!title) title = $el.find('h3 a').text().trim();
-                    if (!title) title = $el.find('.title a').text().trim();
-                    if (!title) title = $el.find('a').first().text().trim();
-                    
-                    // محاولات متعددة للرابط
-                    let mangaUrl = $el.find('.post-title h3 a').attr('href');
-                    if (!mangaUrl) mangaUrl = $el.find('h3 a').attr('href');
-                    if (!mangaUrl) mangaUrl = $el.find('.title a').attr('href');
-                    if (!mangaUrl) mangaUrl = $el.find('a').first().attr('href');
-                    
-                    // إصلاح الروابط النسبية
-                    if (mangaUrl && !mangaUrl.startsWith('http')) {
-                        mangaUrl = 'https://azoramoon.com' + (mangaUrl.startsWith('/') ? '' : '/') + mangaUrl;
-                    }
-                    
-                    // محاولات للصورة
-                    let coverUrl = $el.find('.item-thumb img').attr('src');
-                    if (!coverUrl) coverUrl = $el.find('img').attr('src');
-                    if (!coverUrl) coverUrl = $el.find('img').attr('data-src');
-                    if (!coverUrl && mangaUrl) {
-                        coverUrl = 'https://via.placeholder.com/175x238?text=No+Cover';
-                    }
-                    
-                    // الفصل الأخير
-                    let latestChapter = $el.find('.chapter-item .chapter a').text().trim();
-                    if (!latestChapter) latestChapter = $el.find('.chapter a').text().trim();
-                    if (!latestChapter) latestChapter = $el.find('.chapter-text').text().trim();
-                    if (!latestChapter) latestChapter = 'غير معروف';
-                    
-                    if (title && mangaUrl) {
-                        const mangaId = crypto.createHash('md5').update(mangaUrl).digest('hex').substring(0, 12);
-                        
-                        mangaList.push({
-                            id: mangaId,
-                            title,
-                            url: mangaUrl,
-                            cover: coverUrl,
-                            latestChapter,
-                            status: 'pending',
-                            addedAt: Date.now(),
-                            selector: usedSelector
-                        });
-                        
-                        console.log(`📖 ${i+1}. ${title}`);
-                    }
-                });
-                break;
-            }
-        }
-        
-        if (foundCount === 0) {
-            console.log('⚠️ لم أعثر على أي عناصر مانجا');
-            console.log('🔍 جرب هذه الانتقالات يدوياً في المتصفح:');
-            selectors.forEach(s => console.log(`  - ${s}`));
+        $('.page-item-detail.manga').each((i, element) => {
+            const $el = $(element);
+            const title = $el.find('.post-title h3 a').text().trim();
+            const mangaUrl = $el.find('.post-title h3 a').attr('href');
+            const coverUrl = $el.find('.item-thumb img').attr('src');
+            const latestChapter = $el.find('.chapter-item .chapter a').text().trim();
             
-            // حفظ HTML للتحليل
-            const fs = require('fs');
-            fs.writeFileSync(`debug_page_${pageNum}.html`, html.substring(0, 5000));
-            console.log('💾 حفظت جزء من HTML للتحليل');
-        }
+            if (title && mangaUrl) {
+                const mangaId = crypto.createHash('md5').update(mangaUrl).digest('hex').substring(0, 12);
+                
+                mangaList.push({
+                    id: mangaId,
+                    title,
+                    url: mangaUrl,
+                    cover: coverUrl,
+                    latestChapter,
+                    page: pageNum,
+                    foundAt: Date.now()
+                });
+            }
+        });
         
-        console.log(`✅ تم استخراج ${mangaList.length} مانجا`);
+        console.log(`📊 صفحة ${pageNum}: ${mangaList.length} مانجا`);
         return mangaList;
         
     } catch (error) {
-        console.error(`❌ خطأ في الصفحة ${pageNum}:`, error.message);
+        console.error(`❌ صفحة ${pageNum}: ${error.message}`);
         return [];
     }
 }
 
-// API للبدء
-app.get('/start-scraping', async (req, res) => {
-    try {
-        const { pages = 1, delay = 3 } = req.query;
-        console.log(`\n🚀 بدء جلب ${pages} صفحة مع تأخير ${delay} ثواني...`);
-        
-        const allManga = [];
-        
-        for (let page = 1; page <= pages; page++) {
-            console.log(`\n📄 الصفحة ${page}/${pages}`);
-            
-            const manga = await scrapeMangaFromPage(page);
-            if (manga.length > 0) {
-                allManga.push(...manga);
-                console.log(`✅ تمت الصفحة ${page}: ${manga.length} مانجا`);
-            } else {
-                console.log(`⚠️ الصفحة ${page}: 0 مانجا`);
-            }
-            
-            // تأخير بين الصفحات
-            if (page < pages) {
-                const waitTime = delay * 1000;
-                console.log(`⏳ انتظار ${delay} ثواني...`);
-                await new Promise(resolve => setTimeout(resolve, waitTime));
-            }
-        }
-        
-        console.log(`\n📊 النتيجة: ${allManga.length} مانجا`);
-        
-        // حفظ في Firebase
-        if (allManga.length > 0) {
-            console.log('\n💾 بدء الحفظ في Firebase...');
-            
-            let savedCount = 0;
-            let failedCount = 0;
-            
-            for (const manga of allManga) {
-                try {
-                    // حفظ المانجا الرئيسية
-                    await writeToFirebase(`HomeManga/${manga.id}`, {
-                        title: manga.title,
-                        url: manga.url,
-                        cover: manga.cover,
-                        latestChapter: manga.latestChapter,
-                        status: 'pending_chapters',
-                        scrapedAt: Date.now(),
-                        page: Math.ceil((allManga.indexOf(manga) + 1) / 20)
-                    });
-                    
-                    // إنشاء مهمة
-                    await writeToFirebase(`Jobs/${manga.id}`, {
-                        mangaUrl: manga.url,
-                        status: 'waiting',
-                        createdAt: Date.now(),
-                        title: manga.title
-                    });
-                    
-                    savedCount++;
-                    console.log(`✅ ${savedCount}. ${manga.title}`);
-                    
-                } catch (error) {
-                    failedCount++;
-                    console.error(`❌ فشل حفظ ${manga.title}:`, error.message);
-                }
-                
-                // تأخير بين عمليات الحفظ
-                await new Promise(resolve => setTimeout(resolve, 500));
-            }
-            
-            res.json({
-                success: true,
-                message: `تم جلب ${allManga.length} مانجا`,
-                details: {
-                    total: allManga.length,
-                    saved: savedCount,
-                    failed: failedCount,
-                    sample: allManga.slice(0, 3).map(m => ({ title: m.title, id: m.id }))
-                }
-            });
-            
-        } else {
-            res.json({
-                success: false,
-                message: 'لم يتم العثور على أي مانجا',
-                suggestion: 'جرب: 1. زور الموقع يدوياً 2. غير User-Agent 3. استخدم VPN'
-            });
-        }
-        
-    } catch (error) {
-        console.error('❌ خطأ:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: error.message,
-            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-        });
-    }
-});
-
-// اختبار الاتصال
-app.get('/test-connection', async (req, res) => {
-    const testUrl = 'https://azoramoon.com/';
-    console.log(`\n🔍 اختبار اتصال بـ ${testUrl}`);
+// 🔄 المعالجة التلقائية
+async function autoScrape() {
+    console.log('\n🔄 بدء المسح التلقائي...');
     
     try {
-        const response = await axios.get(testUrl, {
-            headers: getRandomHeaders(),
-            timeout: 10000
-        });
+        // صفحة واحدة فقط (الأولى)
+        const mangaList = await extractMangaFromPage(1);
         
-        res.json({
-            success: true,
-            status: response.status,
-            headers: response.headers,
-            dataLength: response.data.length,
-            userAgent: getRandomHeaders()['User-Agent']
-        });
+        if (mangaList.length === 0) {
+            console.log('⚠️ لم يتم العثور على مانجا');
+            return;
+        }
+        
+        let newMangaCount = 0;
+        let updatedMangaCount = 0;
+        
+        for (const manga of mangaList) {
+            // التحقق إذا كانت المانجا موجودة
+            const existingManga = await readFromFirebase(`HomeManga/${manga.id}`);
+            
+            if (!existingManga) {
+                // مانجا جديدة
+                await writeToFirebase(`HomeManga/${manga.id}`, {
+                    title: manga.title,
+                    url: manga.url,
+                    cover: manga.cover,
+                    latestChapter: manga.latestChapter,
+                    status: 'pending_chapters',
+                    firstSeen: Date.now(),
+                    lastChecked: Date.now()
+                });
+                
+                // إنشاء مهمة للبوت 2
+                await writeToFirebase(`Jobs/${manga.id}`, {
+                    mangaUrl: manga.url,
+                    title: manga.title,
+                    status: 'waiting',
+                    createdAt: Date.now()
+                });
+                
+                console.log(`➕ مانجا جديدة: ${manga.title}`);
+                newMangaCount++;
+                
+            } else {
+                // تحديث الفصل الأخير
+                if (existingManga.latestChapter !== manga.latestChapter) {
+                    await writeToFirebase(`HomeManga/${manga.id}/latestChapter`, manga.latestChapter);
+                    await writeToFirebase(`HomeManga/${manga.id}/lastChecked`, Date.now());
+                    
+                    // التحقق من فصول جديدة
+                    await checkForNewChapters(manga.id, existingManga);
+                    
+                    console.log(`🔄 تم تحديث: ${manga.title}`);
+                    updatedMangaCount++;
+                }
+            }
+        }
+        
+        console.log(`📊 النتيجة: ${newMangaCount} جديدة, ${updatedMangaCount} محدثة`);
         
     } catch (error) {
-        res.json({
-            success: false,
-            error: error.message,
-            code: error.code,
-            userAgent: getRandomHeaders()['User-Agent']
-        });
+        console.error('❌ خطأ في المسح:', error.message);
     }
+}
+
+// 🔍 التحقق من فصول جديدة
+async function checkForNewChapters(mangaId, mangaData) {
+    try {
+        console.log(`🔍 التحقق من فصول جديدة لـ ${mangaId}`);
+        
+        // قراءة الفصول الحالية
+        const existingChapters = await readFromFirebase(`ImgChapter/${mangaId}`);
+        const currentChapters = existingChapters ? Object.keys(existingChapters).length : 0;
+        
+        // إضافة علامة للمعالجة
+        await writeToFirebase(`HomeManga/${mangaId}/needsChapterCheck`, true);
+        await writeToFirebase(`HomeManga/${mangaId}/lastChapterCheck`, Date.now());
+        
+        console.log(`📝 تم وضع علامة للفحص (${currentChapters} فصل حالياً)`);
+        
+    } catch (error) {
+        console.error(`❌ خطأ في فحص الفصول: ${error.message}`);
+    }
+}
+
+// 🏃‍♂️ تشغيل تلقائي كل 5 دقائق
+let autoScrapeInterval = null;
+
+function startAutoScrape(intervalMinutes = 5) {
+    if (autoScrapeInterval) {
+        clearInterval(autoScrapeInterval);
+    }
+    
+    const intervalMs = intervalMinutes * 60 * 1000;
+    autoScrapeInterval = setInterval(autoScrape, intervalMs);
+    
+    console.log(`⏰ تم ضبط المسح التلقائي كل ${intervalMinutes} دقيقة`);
+    
+    // تشغيل أول مرة مباشرة
+    setTimeout(autoScrape, 5000);
+}
+
+// 🛑 إيقاف المسح التلقائي
+function stopAutoScrape() {
+    if (autoScrapeInterval) {
+        clearInterval(autoScrapeInterval);
+        autoScrapeInterval = null;
+        console.log('⏹️ توقف المسح التلقائي');
+    }
+}
+
+// 📊 API للتحكم
+app.get('/start-auto', (req, res) => {
+    const interval = parseInt(req.query.minutes) || 5;
+    startAutoScrape(interval);
+    res.json({ success: true, message: `بدأ المسح كل ${interval} دقيقة` });
 });
 
-// صفحة رئيسية
+app.get('/stop-auto', (req, res) => {
+    stopAutoScrape();
+    res.json({ success: true, message: 'توقف المسح التلقائي' });
+});
+
+app.get('/run-now', async (req, res) => {
+    await autoScrape();
+    res.json({ success: true, message: 'تم المسح الآن' });
+});
+
+app.get('/status', async (req, res) => {
+    const stats = await readFromFirebase('HomeManga') || {};
+    const jobs = await readFromFirebase('Jobs') || {};
+    
+    const totalManga = Object.keys(stats).length;
+    const pendingJobs = Object.values(jobs).filter(j => j.status === 'waiting').length;
+    
+    res.json({
+        success: true,
+        autoRunning: !!autoScrapeInterval,
+        totalManga,
+        pendingJobs,
+        sample: Object.keys(stats).slice(0, 3)
+    });
+});
+
+// 🏠 صفحة بسيطة
 app.get('/', (req, res) => {
     res.send(`
-        <h1>🛡️ البوت 1 - الإصدار المتطور</h1>
-        
-        <h2>🔗 الروابط:</h2>
-        <ul>
-            <li><a href="/start-scraping?pages=1">/start-scraping?pages=1</a> - صفحة واحدة</li>
-            <li><a href="/start-scraping?pages=2&delay=5">/start-scraping?pages=2&delay=5</a> - صفحتين مع تأخير 5 ثواني</li>
-            <li><a href="/test-connection">/test-connection</a> - اختبار الاتصال</li>
-        </ul>
-        
-        <h2>⚙️ الإعدادات:</h2>
-        <ul>
-            <li>عدد User-Agents: ${USER_AGENTS.length}</li>
-            <li>عدد البروكسيات: ${PROXIES.length}</li>
-            <li>Firebase: ${DATABASE_SECRETS ? '✅' : '❌'}</li>
-        </ul>
-        
-        <h2>🎯 الميزات:</h2>
-        <ul>
-            <li>رؤوس عشوائية لكل طلب</li>
-            <li>محاولة جميع البروكسيات المجانية</li>
-            <li>تأخير ذكي بين الطلبات</li>
-            <li>التشغيل على HTTP/HTTPS</li>
-        </ul>
+        <h1>📚 البوت 1 - المسح التلقائي</h1>
+        <p><a href="/start-auto">/start-auto</a> - بدء التلقائي (5 دقائق)</p>
+        <p><a href="/stop-auto">/stop-auto</a> - إيقاف التلقائي</p>
+        <p><a href="/run-now">/run-now</a> - تشغيل الآن</p>
+        <p><a href="/status">/status</a> - حالة النظام</p>
+        <p>📈 النظام: ${autoScrapeInterval ? '🟢 يعمل' : '🔴 متوقف'}</p>
     `);
 });
 
-// تشغيل السيرفر
+// 🚀 التشغيل
 app.listen(PORT, () => {
-    console.log(`\n✅ البوت 1 المتطور يعمل على المنفذ ${PORT}`);
-    console.log(`🔗 افتح: https://server-1.onrender.com`);
-    console.log(`📱 عدد User-Agents: ${USER_AGENTS.length}`);
-    console.log(`🌐 عدد البروكسيات: ${PROXIES.length}`);
+    console.log(`✅ البوت 1 يعمل على ${PORT}`);
+    console.log(`🔗 http://localhost:${PORT}`);
+    
+    // بدء تلقائي عند التشغيل
+    startAutoScrape(5);
 });
