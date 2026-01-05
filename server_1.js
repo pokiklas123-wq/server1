@@ -85,7 +85,25 @@ let isRunning = false;
 
 async function notifyServer2(mangaId) {
     if (!SERVER_2_URL) return;
-    try { await axios.get(`${SERVER_2_URL}/process-manga/${mangaId}`, { timeout: 5000 }); } catch (e) {}
+    try { 
+        // استخدام مسار مطلق إذا كان الرابط لا يبدأ بـ http
+        const target = SERVER_2_URL.startsWith('http') ? SERVER_2_URL : `https://${SERVER_2_URL}`;
+        await axios.get(`${target}/process-manga/${mangaId}`, { timeout: 10000 }); 
+    } catch (e) {
+        console.log(`⚠️ فشل إخطار السيرفر الثاني للمانجا ${mangaId}: ${e.message}`);
+    }
+}
+
+// دالة لاستخراج المعرف من الرابط (Slug) ليكون أكثر دقة
+function generateMangaId(url, title) {
+    try {
+        // محاولة استخراج الاسم من الرابط (slug)
+        const parts = url.split('/').filter(p => p);
+        const slug = parts[parts.length - 1];
+        if (slug && slug.length > 3) return slug;
+    } catch (e) {}
+    // fallback للمعرف القديم إذا فشل الاستخراج
+    return crypto.createHash('md5').update(url).digest('hex').substring(0, 12);
 }
 
 async function smartEngine() {
@@ -112,7 +130,7 @@ async function smartEngine() {
                         const title = $(el).find('.post-title a').text().trim();
                         const latest = $(el).find('.chapter-item .chapter a').first().text().trim();
                         if (url && title) {
-                            const id = crypto.createHash('md5').update(url).digest('hex').substring(0, 12);
+                            const id = generateMangaId(url, title);
                             mangaList.push({ id, title, url, latestChapter: latest, scrapedAt: Date.now(), page });
                         }
                     });
@@ -128,7 +146,14 @@ async function smartEngine() {
                         const existing = await readFromFirebase(`HomeManga/${manga.id}`);
                         if (!existing || existing.latestChapter !== manga.latestChapter) {
                             await writeToFirebase(`HomeManga/${manga.id}`, manga);
-                            await writeToFirebase(`Jobs/${manga.id}`, { mangaUrl: manga.url, status: 'waiting_chapters', title: manga.title });
+                            // إضافة حالة pending هنا
+                            await writeToFirebase(`Jobs/${manga.id}`, { 
+                                mangaUrl: manga.url, 
+                                status: 'waiting_chapters', 
+                                title: manga.title,
+                                pending: true, // إضافة الحقل المطلوب
+                                createdAt: Date.now()
+                            });
                             await notifyServer2(manga.id);
                         }
                     }
@@ -146,21 +171,29 @@ async function smartEngine() {
             try {
                 const html = await fetchPageWithRetry(`https://azoramoon.com/page/1/?m_orderby=latest`);
                 const $ = cheerio.load(html);
-                $('.c-tabs-item__content .tab-content-area .row .col-sm-6, .page-content-listing .row .col-6').each(async (i, el) => {
+                const items = $('.c-tabs-item__content .tab-content-area .row .col-sm-6, .page-content-listing .row .col-6').toArray();
+                
+                for (const el of items) {
                     const url = $(el).find('.post-title a').attr('href');
                     const title = $(el).find('.post-title a').text().trim();
                     const latest = $(el).find('.chapter-item .chapter a').first().text().trim();
                     if (url && title) {
-                        const id = crypto.createHash('md5').update(url).digest('hex').substring(0, 12);
+                        const id = generateMangaId(url, title);
                         const existing = await readFromFirebase(`HomeManga/${id}`);
                         if (!existing || existing.latestChapter !== latest) {
                             const manga = { id, title, url, latestChapter: latest, scrapedAt: Date.now(), page: 1 };
                             await writeToFirebase(`HomeManga/${id}`, manga);
-                            await writeToFirebase(`Jobs/${id}`, { mangaUrl: url, status: 'waiting_chapters', title });
+                            await writeToFirebase(`Jobs/${id}`, { 
+                                mangaUrl: url, 
+                                status: 'waiting_chapters', 
+                                title,
+                                pending: true, // إضافة الحقل المطلوب
+                                createdAt: Date.now()
+                            });
                             await notifyServer2(id);
                         }
                     }
-                });
+                }
             } catch (e) {}
         }
     } finally { isRunning = false; }
@@ -168,7 +201,7 @@ async function smartEngine() {
 
 const app = express();
 app.get('/start-scraping', (req, res) => { smartEngine(); res.json({ success: true }); });
-app.get('/', (req, res) => { res.send('<h1>🛡️ البوت 1 المتطور V3</h1>'); });
+app.get('/', (req, res) => { res.send('<h1>🛡️ البوت 1 المتطور V3 - Fixed</h1>'); });
 app.listen(PORT, () => {
     setInterval(smartEngine, 1000 * 60 * 5);
     smartEngine();
