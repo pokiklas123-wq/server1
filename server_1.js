@@ -10,6 +10,17 @@ const DATABASE_URL = "https://hackerdz-b1bdf.firebaseio.com";
 const SERVER_2_URL = process.env.SERVER_2_URL || 'http://localhost:3001';
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY;
 
+// ==================== إعدادات النظام ====================
+const SYSTEM_CONFIG = {
+    MAX_MANGA_PER_GROUP: 50,           // 50 مانجا في كل مجموعة
+    MAX_PAGES: 67,                     // 67 صفحة كاملة
+    DELAY_BETWEEN_PAGES: 5000,         // 5 ثواني بين الصفحات
+    DELAY_BETWEEN_MANGA: 1000,         // 1 ثانية بين المانجا
+    USE_IMGBB: false,                  // إلغاء ImgBB نهائياً
+    GROUP_PREFIX: 'HomeManga',         // HomeManga_1, HomeManga_2
+    CHAPTER_GROUP_PREFIX: 'ImgChapter' // ImgChapter_1, ImgChapter_2
+};
+
 const FIXED_DB_URL = DATABASE_URL && !DATABASE_URL.endsWith('/') ? DATABASE_URL + '/' : DATABASE_URL;
 
 // ==================== دوال Firebase ====================
@@ -45,34 +56,70 @@ async function readFromFirebase(path) {
     }
 }
 
-// ==================== دالة رفع الصور إلى ImgBB ====================
+// ==================== نظام المجموعات الذكي ====================
+class GroupManager {
+    constructor() {
+        this.groupCounter = 1;
+        this.currentGroupCount = 0;
+        this.totalMangaSaved = 0;
+    }
+    
+    // تحديد المجموعة المناسبة للمانجا
+    async getCurrentGroup() {
+        if (this.currentGroupCount >= SYSTEM_CONFIG.MAX_MANGA_PER_GROUP) {
+            this.groupCounter++;
+            this.currentGroupCount = 0;
+            console.log(`🔄 الانتقال إلى المجموعة ${this.groupCounter}`);
+        }
+        return `${SYSTEM_CONFIG.GROUP_PREFIX}_${this.groupCounter}`;
+    }
+    
+    // زيادة عداد المانجا في المجموعة
+    async incrementGroupCount() {
+        this.currentGroupCount++;
+        this.totalMangaSaved++;
+        
+        // تحديث الإحصائيات في Firebase
+        await writeToFirebase(`System/stats`, {
+            totalManga: this.totalMangaSaved,
+            currentGroup: this.groupCounter,
+            currentGroupCount: this.currentGroupCount,
+            lastUpdate: Date.now()
+        });
+        
+        return this.currentGroupCount;
+    }
+    
+    // الحصول على إحصائيات المجموعات
+    async getGroupStats() {
+        const stats = await readFromFirebase(`System/stats`) || {};
+        this.groupCounter = stats.currentGroup || 1;
+        this.currentGroupCount = stats.currentGroupCount || 0;
+        this.totalMangaSaved = stats.totalManga || 0;
+        return stats;
+    }
+}
+
+const groupManager = new GroupManager();
+
+// ==================== دوال رفع الصور ====================
 async function uploadToImgBB(imageUrl) {
-    if (!IMGBB_API_KEY) {
-        console.log('⚠️ IMGBB_API_KEY مفقود. سيتم استخدام الرابط الأصلي.');
-        return { success: false, url: imageUrl, message: 'API key missing' };
+    if (!SYSTEM_CONFIG.USE_IMGBB || !IMGBB_API_KEY) {
+        return { success: false, url: imageUrl, message: 'ImgBB غير مفعل' };
     }
     try {
-        const imageResponse = await axios.get(imageUrl, { 
-            responseType: 'arraybuffer', 
-            timeout: 20000,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-        });
+        const imageResponse = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 20000 });
         const base64Image = Buffer.from(imageResponse.data, 'binary').toString('base64');
         const formData = new URLSearchParams();
         formData.append('key', IMGBB_API_KEY);
         formData.append('image', base64Image);
-        const uploadResponse = await axios.post('https://api.imgbb.com/1/upload', formData, { 
-            timeout: 30000,
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-        });
+        const uploadResponse = await axios.post('https://api.imgbb.com/1/upload', formData, { timeout: 30000 });
         if (uploadResponse.data.success) {
             return { success: true, url: uploadResponse.data.data.url };
         }
         return { success: false, url: imageUrl, message: uploadResponse.data.error?.message || 'Upload failed' };
     } catch (error) {
-        console.error(`❌ فشل رفع الغلاف لـ ImgBB: ${error.message}`);
+        console.error(`❌ فشل رفع الصورة لـ ImgBB: ${error.message}`);
         return { success: false, url: imageUrl, message: error.message };
     }
 }
@@ -126,8 +173,6 @@ async function tryAllProxies(url) {
                 targetUrl = proxy + encodeURIComponent(url);
             }
             
-            console.log(`🔄 محاولة [${proxy ? 'بروكسي' : 'مباشر'}]`);
-            
             const response = await axios.get(targetUrl, {
                 headers: getRandomHeaders(),
                 timeout: 20000,
@@ -136,7 +181,6 @@ async function tryAllProxies(url) {
             });
             
             if (response.status === 200) {
-                console.log(`✅ نجح [${proxy ? 'بروكسي' : 'مباشر'}]`);
                 return response.data;
             } else {
                 errors.push(`${proxy ? 'بروكسي' : 'مباشر'}: ${response.status}`);
@@ -144,7 +188,6 @@ async function tryAllProxies(url) {
             
         } catch (error) {
             errors.push(`${proxy ? 'بروكسي' : 'مباشر'}: ${error.message}`);
-            console.log(`❌ فشل [${proxy ? 'بروكسي' : 'مباشر'}]: ${error.message}`);
         }
         await new Promise(resolve => setTimeout(resolve, 1000));
     }
@@ -152,7 +195,7 @@ async function tryAllProxies(url) {
     throw new Error(`فشلت جميع محاولات الجلب:\n${errors.join('\n')}`);
 }
 
-// ==================== منطق الاستخراج ====================
+// ==================== منطق استخراج المانجا ====================
 function extractManga(html, pageNum) {
     const $ = cheerio.load(html);
     const mangaList = [];
@@ -170,7 +213,6 @@ function extractManga(html, pageNum) {
         if (elements.length > 0) {
             usedSelector = selector;
             foundCount = elements.length;
-            console.log(`✅ وجد ${foundCount} مانجا`);
 
             elements.each((i, element) => {
                 const $el = $(element);
@@ -211,31 +253,111 @@ function extractManga(html, pageNum) {
     return mangaList;
 }
 
-// ==================== منطق التتابع والاتصال ====================
-async function notifyServer2(mangaId) {
-    const url = `${SERVER_2_URL}/process-manga/${mangaId}`;
-    console.log(`\n🔔 إخطار البوت 2 لمعالجة المانجا: ${mangaId}`);
-    
+// ==================== منطق حفظ المانجا في المجموعات ====================
+async function saveMangaToGroup(manga) {
     try {
-        const response = await axios.get(url, { timeout: 15000 });
-        console.log(`✅ استجابة البوت 2: ${response.data.message || 'تم الإخطار'}`);
+        // 1. الحصول على المجموعة الحالية
+        await groupManager.getGroupStats();
+        const currentGroup = await groupManager.getCurrentGroup();
+        
+        // 2. التحقق من وجود المانجا في أي مجموعة
+        let existingManga = null;
+        let existingGroup = null;
+        
+        // البحث في المجموعات السابقة
+        const stats = await groupManager.getGroupStats();
+        const maxGroup = stats.currentGroup || 1;
+        
+        for (let g = 1; g <= maxGroup; g++) {
+            const groupName = `${SYSTEM_CONFIG.GROUP_PREFIX}_${g}`;
+            const mangaInGroup = await readFromFirebase(`${groupName}/${manga.id}`);
+            if (mangaInGroup) {
+                existingManga = mangaInGroup;
+                existingGroup = groupName;
+                break;
+            }
+        }
+        
+        // 3. إذا كانت موجودة، تحديث فقط إذا كان هناك فصل جديد
+        if (existingManga) {
+            if (existingManga.latestChapter !== manga.latestChapter) {
+                console.log(`🔄 تحديث: ${manga.title} (فصل جديد)`);
+                
+                existingManga.latestChapter = manga.latestChapter;
+                existingManga.updatedAt = Date.now();
+                existingManga.status = 'pending_chapters';
+                
+                await writeToFirebase(`${existingGroup}/${manga.id}`, existingManga);
+                
+                // إخطار البوت 2
+                await notifyServer2(manga.id, existingGroup);
+                return { saved: true, updated: true, group: existingGroup };
+            }
+            return { saved: false, updated: false, group: existingGroup };
+        }
+        
+        // 4. إذا كانت جديدة، حفظ في المجموعة الحالية
+        console.log(`✨ جديد: ${manga.title}`);
+        
+        const mangaData = {
+            ...manga,
+            group: currentGroup,
+            savedAt: Date.now(),
+            mangaNumber: groupManager.totalMangaSaved + 1
+        };
+        
+        await writeToFirebase(`${currentGroup}/${manga.id}`, mangaData);
+        
+        // 5. زيادة عداد المجموعة
+        await groupManager.incrementGroupCount();
+        
+        // 6. إخطار البوت 2
+        await notifyServer2(manga.id, currentGroup);
+        
+        return { saved: true, updated: false, group: currentGroup };
+        
     } catch (error) {
-        console.error(`❌ فشل إخطار البوت 2: ${error.message}`);
+        console.error(`❌ خطأ في حفظ المانجا ${manga.title}:`, error.message);
+        return { saved: false, error: error.message };
     }
 }
 
+// ==================== إخطار البوت 2 ====================
+async function notifyServer2(mangaId, groupName) {
+    const url = `${SERVER_2_URL}/process-manga/${mangaId}?group=${groupName}`;
+    console.log(`🔔 إخطار البوت 2: ${mangaId} (${groupName})`);
+    
+    try {
+        await axios.get(url, { timeout: 10000 });
+        console.log(`✅ تم الإخطار بنجاح`);
+    } catch (error) {
+        console.error(`⚠️ فشل إخطار البوت 2: ${error.message}`);
+    }
+}
+
+// ==================== الجلب المستمر ====================
 async function startContinuousScraping() {
-    let config = await readFromFirebase('Config/Scraper') || { currentPage: 1, isComplete: "false" };
+    // تحميل الإحصائيات
+    await groupManager.getGroupStats();
+    
+    // تحميل الإعدادات
+    let config = await readFromFirebase('Config/Scraper') || { 
+        currentPage: 1, 
+        isComplete: "false",
+        totalPagesScraped: 0,
+        lastScraped: Date.now()
+    };
+    
     let page = config.isComplete === "true" ? 1 : config.currentPage;
     let totalMangaCount = 0;
     let newMangaCount = 0;
-    const MAX_PAGES = 67;
 
     console.log(`\n🚀 بدء الجلب. الصفحة: ${page}, مكتمل: ${config.isComplete}`);
+    console.log(`📊 الإحصائيات: ${groupManager.totalMangaSaved} مانجا في ${groupManager.groupCounter} مجموعات`);
 
     while (true) {
         const url = `https://azoramoon.com/page/${page}/?m_orderby=latest`;
-        console.log(`\n📄 جلب الصفحة ${page}`);
+        console.log(`\n📄 جلب الصفحة ${page} من ${SYSTEM_CONFIG.MAX_PAGES}`);
         
         try {
             const html = await tryAllProxies(url);
@@ -245,6 +367,7 @@ async function startContinuousScraping() {
                 console.log(`⚠️ الصفحة ${page} فارغة`);
                 if (config.isComplete === "false") {
                     config.isComplete = "true";
+                    config.currentPage = 1;
                     await writeToFirebase('Config/Scraper', config);
                 }
                 break;
@@ -252,62 +375,44 @@ async function startContinuousScraping() {
 
             let pageNewManga = 0;
             for (const manga of mangaOnPage) {
-                const existingManga = await readFromFirebase(`HomeManga/${manga.id}`);
+                const result = await saveMangaToGroup(manga);
                 
-                if (!existingManga || existingManga.latestChapter !== manga.latestChapter) {
-                    console.log(`✨ معالجة: ${manga.title}`);
-                    
-                    let imgbbCover = manga.cover;
-                    const uploadResult = await uploadToImgBB(manga.cover);
-                    if (uploadResult.success) {
-                        imgbbCover = uploadResult.url;
-                    }
-
-                    const mangaData = {
-                        ...manga,
-                        imgbbCover: imgbbCover,
-                        originalCover: manga.cover,
-                        updatedAt: Date.now()
-                    };
-
-                    await writeToFirebase(`HomeManga/${manga.id}`, mangaData);
-                    
-                    await writeToFirebase(`Jobs/${manga.id}`, {
-                        mangaUrl: manga.url,
-                        status: 'waiting_chapters',
-                        createdAt: Date.now(),
-                        title: manga.title
-                    });
-                    
+                if (result.saved) {
                     pageNewManga++;
                     newMangaCount++;
-                    
-                    await notifyServer2(manga.id);
                 }
+                
+                // تأخير بين المانجا
+                await new Promise(resolve => setTimeout(resolve, SYSTEM_CONFIG.DELAY_BETWEEN_MANGA));
             }
             
             totalMangaCount += mangaOnPage.length;
             console.log(`✅ الصفحة ${page}: ${mangaOnPage.length} مانجا، ${pageNewManga} جديدة`);
 
+            // تحديث الإعدادات
             if (config.isComplete === "false") {
                 page++;
                 config.currentPage = page;
-                if (page > MAX_PAGES) {
+                config.totalPagesScraped = (config.totalPagesScraped || 0) + 1;
+                
+                if (page > SYSTEM_CONFIG.MAX_PAGES) {
                     config.isComplete = "true";
                     config.currentPage = 1;
+                    config.completedAt = Date.now();
                     await writeToFirebase('Config/Scraper', config);
                     console.log("🏁 وصلت للصفحة 67. مكتمل.");
                     break;
                 }
+                
                 await writeToFirebase('Config/Scraper', config);
             } else {
                 console.log("ℹ️ الأرشفة مكتملة. جاري فحص الصفحة الأولى");
                 break;
             }
             
-            const waitTime = 5000;
-            console.log(`⏳ انتظار ${waitTime / 1000} ثواني`);
-            await new Promise(resolve => setTimeout(resolve, waitTime));
+            // انتظار بين الصفحات
+            console.log(`⏳ انتظار ${SYSTEM_CONFIG.DELAY_BETWEEN_PAGES / 1000} ثواني`);
+            await new Promise(resolve => setTimeout(resolve, SYSTEM_CONFIG.DELAY_BETWEEN_PAGES));
 
         } catch (error) {
             console.error(`❌ خطأ في الصفحة ${page}:`, error.message);
@@ -315,7 +420,18 @@ async function startContinuousScraping() {
         }
     }
     
-    return { totalMangaCount, newMangaCount };
+    console.log(`\n📊 النتائج النهائية:`);
+    console.log(`📚 إجمالي المانجا: ${totalMangaCount}`);
+    console.log(`🆕 مانجا جديدة: ${newMangaCount}`);
+    console.log(`📁 عدد المجموعات: ${groupManager.groupCounter}`);
+    console.log(`🏁 الحالة: ${config.isComplete === "true" ? "مكتمل" : "نشط"}`);
+    
+    return { 
+        totalMangaCount, 
+        newMangaCount, 
+        totalGroups: groupManager.groupCounter,
+        status: config.isComplete 
+    };
 }
 
 // ==================== واجهات API ====================
@@ -324,17 +440,103 @@ const app = express();
 app.get('/start-scraping', async (req, res) => {
     try {
         startContinuousScraping();
-        res.json({ success: true, message: 'بدأت عملية الجلب' });
+        res.json({ 
+            success: true, 
+            message: 'بدأت عملية الجلب',
+            system: SYSTEM_CONFIG
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/stats', async (req, res) => {
+    try {
+        const stats = await groupManager.getGroupStats();
+        const config = await readFromFirebase('Config/Scraper') || {};
+        
+        res.json({
+            success: true,
+            system: SYSTEM_CONFIG,
+            stats: stats,
+            config: config,
+            groups: Array.from({length: stats.currentGroup || 1}, (_, i) => 
+                `${SYSTEM_CONFIG.GROUP_PREFIX}_${i + 1}`
+            )
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/reset', async (req, res) => {
+    try {
+        await writeToFirebase('Config/Scraper', {
+            currentPage: 1,
+            isComplete: "false",
+            resetAt: Date.now()
+        });
+        
+        await writeToFirebase('System/stats', {
+            totalManga: 0,
+            currentGroup: 1,
+            currentGroupCount: 0,
+            resetAt: Date.now()
+        });
+        
+        res.json({ 
+            success: true, 
+            message: 'تم إعادة التعيين بنجاح' 
+        });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
 app.get('/', (req, res) => {
-    res.send(`<h1>🛡️ البوت 1 - جالب المانجا</h1><p>استخدم <a href="/start-scraping">/start-scraping</a> للبدء.</p>`);
+    res.send(`
+        <h1>🚀 البوت 1 - النسخة النهائية</h1>
+        <p><strong>نظام المجموعات:</strong> ${SYSTEM_CONFIG.GROUP_PREFIX}_1 إلى ${SYSTEM_CONFIG.GROUP_PREFIX}_52</p>
+        <p><strong>عدد الصفحات:</strong> ${SYSTEM_CONFIG.MAX_PAGES} صفحة كاملة</p>
+        <p><strong>المانجا في كل مجموعة:</strong> ${SYSTEM_CONFIG.MAX_MANGA_PER_GROUP}</p>
+        <p><strong>ImgBB:</strong> ${SYSTEM_CONFIG.USE_IMGBB ? 'مفعل' : 'معطل'}</p>
+        
+        <h3>الروابط:</h3>
+        <p><a href="/start-scraping">/start-scraping</a> - بدء الجلب</p>
+        <p><a href="/stats">/stats</a> - الإحصائيات</p>
+        <p><a href="/reset">/reset</a> - إعادة التعيين</p>
+        
+        <h3>هيكل التخزين:</h3>
+        <pre>${SYSTEM_CONFIG.GROUP_PREFIX}_1/
+├── manga_id_1
+├── manga_id_2
+└── ... (50 مانجا)
+
+${SYSTEM_CONFIG.GROUP_PREFIX}_2/
+├── manga_id_51
+└── ... (50 مانجا)
+
+... حتى ${SYSTEM_CONFIG.GROUP_PREFIX}_52</pre>
+    `);
 });
 
 app.listen(PORT, () => {
     console.log(`\n✅ البوت 1 يعمل على المنفذ ${PORT}`);
-    startContinuousScraping();
+    console.log(`📊 النظام:`);
+    console.log(`   • الصفحات: ${SYSTEM_CONFIG.MAX_PAGES}`);
+    console.log(`   • المانجا/مجموعة: ${SYSTEM_CONFIG.MAX_MANGA_PER_GROUP}`);
+    console.log(`   • البادئة: ${SYSTEM_CONFIG.GROUP_PREFIX}_#`);
+    console.log(`   • الفصول: ${SYSTEM_CONFIG.CHAPTER_GROUP_PREFIX}_#`);
+    console.log(`   • ImgBB: ${SYSTEM_CONFIG.USE_IMGBB ? 'مفعل' : 'معطل'}`);
+    
+    // بدء الجلب تلقائياً
+    setTimeout(async () => {
+        const config = await readFromFirebase('Config/Scraper');
+        if (config && config.isComplete !== "true") {
+            console.log('🔄 استئناف الجلب من الحالة السابقة...');
+            startContinuousScraping();
+        } else {
+            console.log('⏸️ الجلب مكتمل أو غير نشط');
+        }
+    }, 3000);
 });
