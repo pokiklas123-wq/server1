@@ -7,7 +7,7 @@ require('dotenv').config();
 const PORT = process.env.PORT || 3000;
 const DATABASE_SECRETS = "KXPNxnGZDA1BGnzs4kZIA45o6Vr9P5nJ3Z01X4bt";
 const DATABASE_URL = "https://hackerdz-b1bdf.firebaseio.com";
-const SERVER_2_URL = process.env.SERVER_2_URL || 'http://localhost:3001';
+const SERVER_2_URL = "https://server-2-n9s3.onrender.com";
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY;
 
 // ==================== إعدادات النظام ====================
