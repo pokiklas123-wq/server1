@@ -5,20 +5,20 @@ require('dotenv').config();
 
 // ==================== متغيرات البيئة ====================
 const PORT = process.env.PORT || 3000;
-const DATABASE_SECRETS = "KXPNxnGZDA1BGnzs4kZIA45o6Vr9P5nJ3Z01X4bt";
-const DATABASE_URL = "https://hackerdz-b1bdf.firebaseio.com";
+const DATABASE_SECRETS = process.env.DATABASE_SECRETS || "KXPNxnGZDA1BGnzs4kZIA45o6Vr9P5nJ3Z01X4bt";
+const DATABASE_URL = process.env.DATABASE_URL || "https://hackerdz-b1bdf.firebaseio.com";
 const SERVER_2_URL = process.env.SERVER_2_URL || 'http://localhost:3001';
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY;
 
 // ==================== إعدادات النظام ====================
 const SYSTEM_CONFIG = {
-    MAX_MANGA_PER_GROUP: 50,           // 50 مانجا في كل مجموعة
-    MAX_PAGES: 67,                     // 67 صفحة كاملة
-    DELAY_BETWEEN_PAGES: 5000,         // 5 ثواني بين الصفحات
-    DELAY_BETWEEN_MANGA: 1000,         // 1 ثانية بين المانجا
-    USE_IMGBB: false,                  // إلغاء ImgBB نهائياً
-    GROUP_PREFIX: 'HomeManga',         // HomeManga_1, HomeManga_2
-    CHAPTER_GROUP_PREFIX: 'ImgChapter' // ImgChapter_1, ImgChapter_2
+    MAX_MANGA_PER_GROUP: 50,
+    MAX_PAGES: 67,
+    DELAY_BETWEEN_PAGES: 5000,
+    DELAY_BETWEEN_MANGA: 1000,
+    USE_IMGBB: false,
+    GROUP_PREFIX: 'HomeManga',
+    CHAPTER_GROUP_PREFIX: 'ImgChapter'
 };
 
 const FIXED_DB_URL = DATABASE_URL && !DATABASE_URL.endsWith('/') ? DATABASE_URL + '/' : DATABASE_URL;
@@ -64,35 +64,39 @@ class GroupManager {
         this.totalMangaSaved = 0;
     }
     
-    // تحديد المجموعة المناسبة للمانجا
+    async initialize() {
+        const stats = await readFromFirebase('System/stats');
+        if (stats) {
+            this.groupCounter = stats.currentGroup || 1;
+            this.currentGroupCount = stats.currentGroupCount || 0;
+            this.totalMangaSaved = stats.totalManga || 0;
+        }
+    }
+    
     async getCurrentGroup() {
         if (this.currentGroupCount >= SYSTEM_CONFIG.MAX_MANGA_PER_GROUP) {
             this.groupCounter++;
             this.currentGroupCount = 0;
-            console.log(`🔄 الانتقال إلى المجموعة ${this.groupCounter}`);
         }
         return `${SYSTEM_CONFIG.GROUP_PREFIX}_${this.groupCounter}`;
     }
     
-    // زيادة عداد المانجا في المجموعة
     async incrementGroupCount() {
         this.currentGroupCount++;
         this.totalMangaSaved++;
         
-        // تحديث الإحصائيات في Firebase
-        await writeToFirebase(`System/stats`, {
-            totalManga: this.totalMangaSaved,
+        await writeToFirebase('System/stats', {
             currentGroup: this.groupCounter,
             currentGroupCount: this.currentGroupCount,
+            totalManga: this.totalMangaSaved,
             lastUpdate: Date.now()
         });
         
         return this.currentGroupCount;
     }
     
-    // الحصول على إحصائيات المجموعات
     async getGroupStats() {
-        const stats = await readFromFirebase(`System/stats`) || {};
+        const stats = await readFromFirebase('System/stats') || {};
         this.groupCounter = stats.currentGroup || 1;
         this.currentGroupCount = stats.currentGroupCount || 0;
         this.totalMangaSaved = stats.totalManga || 0;
@@ -256,15 +260,12 @@ function extractManga(html, pageNum) {
 // ==================== منطق حفظ المانجا في المجموعات ====================
 async function saveMangaToGroup(manga) {
     try {
-        // 1. الحصول على المجموعة الحالية
-        await groupManager.getGroupStats();
+        await groupManager.initialize();
         const currentGroup = await groupManager.getCurrentGroup();
         
-        // 2. التحقق من وجود المانجا في أي مجموعة
         let existingManga = null;
         let existingGroup = null;
         
-        // البحث في المجموعات السابقة
         const stats = await groupManager.getGroupStats();
         const maxGroup = stats.currentGroup || 1;
         
@@ -278,7 +279,6 @@ async function saveMangaToGroup(manga) {
             }
         }
         
-        // 3. إذا كانت موجودة، تحديث فقط إذا كان هناك فصل جديد
         if (existingManga) {
             if (existingManga.latestChapter !== manga.latestChapter) {
                 console.log(`🔄 تحديث: ${manga.title} (فصل جديد)`);
@@ -289,15 +289,14 @@ async function saveMangaToGroup(manga) {
                 
                 await writeToFirebase(`${existingGroup}/${manga.id}`, existingManga);
                 
-                // إخطار البوت 2
                 await notifyServer2(manga.id, existingGroup);
                 return { saved: true, updated: true, group: existingGroup };
             }
             return { saved: false, updated: false, group: existingGroup };
         }
         
-        // 4. إذا كانت جديدة، حفظ في المجموعة الحالية
         console.log(`✨ جديد: ${manga.title}`);
+        console.log(`📁 الحفظ في: ${currentGroup}`);
         
         const mangaData = {
             ...manga,
@@ -308,13 +307,23 @@ async function saveMangaToGroup(manga) {
         
         await writeToFirebase(`${currentGroup}/${manga.id}`, mangaData);
         
-        // 5. زيادة عداد المجموعة
-        await groupManager.incrementGroupCount();
+        const newCount = await groupManager.incrementGroupCount();
         
-        // 6. إخطار البوت 2
+        console.log(`📊 العداد: ${newCount}/${SYSTEM_CONFIG.MAX_MANGA_PER_GROUP}`);
+        
+        if (newCount >= SYSTEM_CONFIG.MAX_MANGA_PER_GROUP) {
+            console.log(`🏁 المجموعة ${currentGroup} ممتلئة!`);
+        }
+        
         await notifyServer2(manga.id, currentGroup);
         
-        return { saved: true, updated: false, group: currentGroup };
+        return { 
+            saved: true, 
+            updated: false, 
+            group: currentGroup,
+            count: newCount,
+            total: groupManager.totalMangaSaved 
+        };
         
     } catch (error) {
         console.error(`❌ خطأ في حفظ المانجا ${manga.title}:`, error.message);
@@ -337,10 +346,8 @@ async function notifyServer2(mangaId, groupName) {
 
 // ==================== الجلب المستمر ====================
 async function startContinuousScraping() {
-    // تحميل الإحصائيات
     await groupManager.getGroupStats();
     
-    // تحميل الإعدادات
     let config = await readFromFirebase('Config/Scraper') || { 
         currentPage: 1, 
         isComplete: "false",
@@ -382,14 +389,12 @@ async function startContinuousScraping() {
                     newMangaCount++;
                 }
                 
-                // تأخير بين المانجا
                 await new Promise(resolve => setTimeout(resolve, SYSTEM_CONFIG.DELAY_BETWEEN_MANGA));
             }
             
             totalMangaCount += mangaOnPage.length;
             console.log(`✅ الصفحة ${page}: ${mangaOnPage.length} مانجا، ${pageNewManga} جديدة`);
 
-            // تحديث الإعدادات
             if (config.isComplete === "false") {
                 page++;
                 config.currentPage = page;
@@ -410,7 +415,6 @@ async function startContinuousScraping() {
                 break;
             }
             
-            // انتظار بين الصفحات
             console.log(`⏳ انتظار ${SYSTEM_CONFIG.DELAY_BETWEEN_PAGES / 1000} ثواني`);
             await new Promise(resolve => setTimeout(resolve, SYSTEM_CONFIG.DELAY_BETWEEN_PAGES));
 
@@ -495,7 +499,7 @@ app.get('/reset', async (req, res) => {
 
 app.get('/', (req, res) => {
     res.send(`
-        <h1>🚀 البوت 1 - النسخة النهائية</h1>
+        <h1>🚀 البوت 1</h1>
         <p><strong>نظام المجموعات:</strong> ${SYSTEM_CONFIG.GROUP_PREFIX}_1 إلى ${SYSTEM_CONFIG.GROUP_PREFIX}_52</p>
         <p><strong>عدد الصفحات:</strong> ${SYSTEM_CONFIG.MAX_PAGES} صفحة كاملة</p>
         <p><strong>المانجا في كل مجموعة:</strong> ${SYSTEM_CONFIG.MAX_MANGA_PER_GROUP}</p>
@@ -505,18 +509,6 @@ app.get('/', (req, res) => {
         <p><a href="/start-scraping">/start-scraping</a> - بدء الجلب</p>
         <p><a href="/stats">/stats</a> - الإحصائيات</p>
         <p><a href="/reset">/reset</a> - إعادة التعيين</p>
-        
-        <h3>هيكل التخزين:</h3>
-        <pre>${SYSTEM_CONFIG.GROUP_PREFIX}_1/
-├── manga_id_1
-├── manga_id_2
-└── ... (50 مانجا)
-
-${SYSTEM_CONFIG.GROUP_PREFIX}_2/
-├── manga_id_51
-└── ... (50 مانجا)
-
-... حتى ${SYSTEM_CONFIG.GROUP_PREFIX}_52</pre>
     `);
 });
 
@@ -526,10 +518,7 @@ app.listen(PORT, () => {
     console.log(`   • الصفحات: ${SYSTEM_CONFIG.MAX_PAGES}`);
     console.log(`   • المانجا/مجموعة: ${SYSTEM_CONFIG.MAX_MANGA_PER_GROUP}`);
     console.log(`   • البادئة: ${SYSTEM_CONFIG.GROUP_PREFIX}_#`);
-    console.log(`   • الفصول: ${SYSTEM_CONFIG.CHAPTER_GROUP_PREFIX}_#`);
-    console.log(`   • ImgBB: ${SYSTEM_CONFIG.USE_IMGBB ? 'مفعل' : 'معطل'}`);
     
-    // بدء الجلب تلقائياً
     setTimeout(async () => {
         const config = await readFromFirebase('Config/Scraper');
         if (config && config.isComplete !== "true") {
